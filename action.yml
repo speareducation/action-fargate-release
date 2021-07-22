@@ -1,57 +1,70 @@
-name: Composer Install
-description: Sets up PHP, then runs composer validate and install. Supports private API keys.
+name: Fargate Release
+description: Performs a docker build, pushes to ECR, and performs an ECS release.
 
 inputs:
-  php-version:
-    description: The PHP version to use
+  ecr-repo:
+    description: The ECR Repo name without the ECR Registry portion.
     required: true
-  php-extensions:
-    description: a comma-separated list of PHP extensions
-    default: mbstring, json, gd, opcache, curl, bz2, sqlite3, xml, intl, zip, mbstring, readline, xmlrpc, pcov
+  app-env:
+    description: The APP_ENV (use action-build-vars.appEnv)
+    required: true
+  release:
+    description: The release tag (action-build-vars.release)
+    required: true
+  task-definition:
+    description: The path to the task definiton
+    required: true
+  task-container:
+    description: The container within the task to use
+    default: web-container
     required: false
-  composer-version:
-    description: composer version
-    default: 2
-    required: false
-  composer-api-key:
-    description: An API key to use with composer
-    default: null
-    required: false
-  validation-results-path:
-    description: Path or name of directory to store composer validate results
-    required: false
-    default: .ci-results/composer-validation.txt
+  service:
+    description: The ECS/Fargate Service name
+    required: true
 
 runs:
   using: composite
+  env:
+    ECR_REPO: ${{ inputs.ecr-repo }}
+    APP_ENV: ${{ inputs.app-env }}
+
   steps:
-    - name: Setup PHP
-      uses: shivammathur/setup-php@v2
-      with:
-        php-version: ${{ inputs.php-version }}
-        tools: pecl, composer:v${{ inputs.composer-version }}
-        extensions: ${{ inputs.php-extensions }}
 
-    - id: composer-validate
-      name: Validate composer.json and composer.lock
-      run: composer validate | tee "${{ inputs.valiation-results-path }}"
+      - id: docker-build
+        name: Docker Build
+        run: docker build -t ${{ inputs.ecr-repo }} .
 
-    - id: composer-auth
-      if: inputs.composer-api-key
-      name: Setup Composer Auth
-      uses: speareducation/action-setup-composer-auth@main
-      with:
-        apiKey: ${{ inputs.composer-api-key }}
+      - id: ecr-login
+        name: ECR Login
+        uses: aws-actions/amazon-ecr-login@v1
 
-    - name: Cache Composer Packages
-      uses: actions/cache@v2
-      env:
-        cache-name: cache-composer
-      with:
-        path: ./vendor
-        key: composer-vendor-cache-${{ hashFiles('./composer.lock') }}
-        restore-keys: composer-vendor-cache-
+      - id: ecr-upload
+        name: Tag and upload the image
+        env:
+          APP_ENV: ${{ inputs.app-env }}
+          RELEASE: ${{ inputs.release }}
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+        run: |
+          docker tag $ECR_REPO:latest $ECR_REGISTRY/$ECR_REPO:$APP_ENV-$RELEASE
+          docker tag $ECR_REPO:latest $ECR_REGISTRY/$ECR_REPO:$APP_ENV-latest
+          docker push $ECR_REGISTRY/$ECR_REPO:$APP_ENV-$RELEASE
+          docker push $ECR_REGISTRY/$ECR_REPO:$APP_ENV-latest
+          echo "::set-output name=image::$ECR_REGISTRY/$ECR_REPO:$APP_ENV-$RELEASE"
 
-    - id: composer-install
-      name: Composer Install
-      run: composer install --prefer-dist
+      - id: task-def
+        name: Fill in the new image ID in the Amazon ECS task definition
+        if: inputs.app-env != 'sandbox'
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: ${{ inputs.task-definition }}
+          container-name: ${{ inputs.task-container }}
+          image: ${{ steps.ecr-upload.outputs.image }}
+
+      - name: Deploy Amazon ECS task definition
+        if: inputs.app-env != 'sandbox'
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.task-def.outputs.task-definition }}
+          service: ${{ inputs.service }}
+          cluster: spear-core-${{ inputs.app-env }}
+          wait-for-service-stability: true

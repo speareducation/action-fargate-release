@@ -1,25 +1,34 @@
-# Github Actions for Composer Install
+# Github Actions for ECR Build & ECS Fargate Release
 
+### Environment
+This action uses environment authorization for the AWS CLI.
+```
+env:
+  AWS_ACCESS_KEY_ID: ${{ secrets.YOUR_AWS_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.YOUR_AWS_SECRET_ACCESS_KEY }}
+  AWS_REGION: us-east-1
+```
 
 ### Inputs
 ```
-  php-version:
-    description: The PHP version to use
+inputs:
+  ecr-repo:
+    description: The ECR Repo name without the ECR Registry portion.
     required: true
-  php-extensions:
-    description: a comma-separated list of PHP extensions
-    default: mbstring, json, gd, opcache, curl, bz2, sqlite3, xml, intl, zip, mbstring, readline, xmlrpc, pcov
+  app-env:
+    description: The APP_ENV (use action-build-vars.appEnv)
+    required: true
+  release:
+    description: The release tag (action-build-vars.release)
+    required: true
+  task-definition:
+    description: The path to the task definiton
+    required: true
+  task-container:
+    description: The container within the task to use
+    default: web-container
     required: false
-  composer-version:
-    description: composer version
-    default: 2
-    required: false
-  composer-api-key:
-    description: An API key to use with composer
-    default: null
-    required: false
-  validation-results-path:
-    description: Path or name of directory to store composer validate results
-    required: false
-    default: .ci-results/composer-validation.txt
+  service:
+    description: The ECS/Fargate Service name
+    required: true
 ```
