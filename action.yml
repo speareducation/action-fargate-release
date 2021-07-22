@@ -1,160 +1,57 @@
-name: JS Run Tests
-description: Runs default lint and test commands from package.json and collects output
+name: Composer Install
+description: Sets up PHP, then runs composer validate and install. Supports private API keys.
 
 inputs:
-  output-path:
-    description: Path or name of directory to store results
+  php-version:
+    description: The PHP version to use
     required: true
-    default: .ci-results
-  lint-results-file:
-    description: Filename for lint results
-    required: true
-    default: js-lint-results.txt
-  test-results-file:
-    description: Filename for test results
-    required: true
-    default: js-test-results.txt
-  pr-comment-file:
-    description: Filename for PR comment
-    required: true
-    default: js-pr-comment.md
-  email-file:
-    description: Filename for email body
-    required: true
-    default: js-overview-email.txt
-
-outputs:
-  lint-result:
-    description: '"PASS" if linting check passed, "FAIL" if problems found'
-    value: ${{ steps.lint-results.outputs.result }}
-  lint-result-emoji:
-    description: 'Emoji code representation of lint result'
-    value: ${{ steps.lint-results.outputs.result-emoji }}
-  lint-success:
-    description: 'Boolean of lint result'
-    value: ${{ steps.lint-results.outputs.success }}
-  lint-summary:
-    description: 'Text summary of lint results'
-    value: ${{ steps.lint-results.outputs.summary }}
-
-  test-result:
-    description: '"PASS" if all tests passed, "FAIL" if problems found'
-    value: ${{ steps.test-results.outputs.result }}
-  test-result-emoji:
-    description: 'Emoji code representation of test result'
-    value: ${{ steps.test-results.outputs.result-emoji }}
-  test-success:
-    description: 'Boolean of test result'
-    value: ${{ steps.test-results.outputs.success }}
-  test-coverage:
-    description: 'Test coverage summary'
-    value: ${{ steps.test-results.outputs.coverage }}
-  test-summary:
-    description: 'Text summary of test results'
-    value: ${{ steps.test-results.outputs.summary }}
+  php-extensions:
+    description: a comma-separated list of PHP extensions
+    default: mbstring, json, gd, opcache, curl, bz2, sqlite3, xml, intl, zip, mbstring, readline, xmlrpc, pcov
+    required: false
+  composer-version:
+    description: composer version
+    default: 2
+    required: false
+  composer-api-key:
+    description: An API key to use with composer
+    default: null
+    required: false
+  validation-results-path:
+    description: Path or name of directory to store composer validate results
+    required: false
+    default: .ci-results/composer-validation.txt
 
 runs:
   using: composite
   steps:
-    # Clear / create output
-    - run: |
-        rm -rf ${{ inputs.output-path }}
-        mkdir ${{ inputs.output-path }}
-      shell: bash
+    - name: Setup PHP
+      uses: shivammathur/setup-php@v2
+      with:
+        php-version: ${{ inputs.php-version }}
+        tools: pecl, composer:v${{ inputs.composer-version }}
+        extensions: ${{ inputs.php-extensions }}
 
-    # Run & interpret linter
-    - id: lint
-      name: Lint Files
-      run: (yarn lint || :) 2>&1 | sed '/error Command failed/,$d' | tee ${{ inputs.output-path }}/${{ inputs.lint-results-file }}
-      shell: bash
+    - id: composer-validate
+      name: Validate composer.json and composer.lock
+      run: composer validate | tee "${{ inputs.valiation-results-path }}"
 
-    - id: lint-results
-      name: Process Test Results
-      run: |
-        FILE=${{ inputs.output-path }}/${{ inputs.lint-results-file }}
-        RESULT=$([ "$(grep -P '.*\d+ problems' $FILE)" != "" ] && echo "FAIL" || echo "PASS")
-        RESULT_EMOJI=$([ "$RESULT" == "PASS" ] && echo ':white_check_mark:' || echo ':x:')
-        SUCCESS=$([ "$RESULT" == "PASS" ] && echo 'true' || echo 'false')
-        SUMMARY=$(grep -P '\d+ problems \(\d+ errors' $FILE | sed -E 's/^.*\(//;s/\).*$//')
-        echo ::set-output name=result::${RESULT}
-        echo ::set-output name=result-emoji::${RESULT_EMOJI}
-        echo ::set-output name=success::${SUCCESS}
-        echo ::set-output name=summary::${SUMMARY}
-      shell: bash
+    - id: composer-auth
+      if: inputs.composer-api-key
+      name: Setup Composer Auth
+      uses: speareducation/action-setup-composer-auth@main
+      with:
+        apiKey: ${{ inputs.composer-api-key }}
 
-    # Run & interpret tests
-    - id: test
-      name: Run Tests
-      run: (yarn test --coverage || :) 2>&1 | tee ${{ inputs.output-path }}/${{ inputs.test-results-file }}
-      shell: bash
-
-    - id: test-results
-      name: Process Test Results
-      run: |
-        FILE=${{ inputs.output-path }}/${{inputs.test-results-file}}
-        RESULT=$([ "$(grep -P 'Tests:.*\d+ failed' $FILE)" != "" ] && echo "FAIL" || echo "PASS")
-        RESULT_EMOJI=$([ "$RESULT" == "PASS" ] && echo ':white_check_mark:' || echo ':x:')
-        SUCCESS=$([ "$RESULT" == "PASS" ] && echo 'true' || echo 'false')
-        COVERAGE=$(sed -n '/Coverage summary/,+4p' $FILE | fgrep 'Lines' | awk '{ print $3 }')
-        SUMMARY=$(fgrep 'Tests:' $FILE | sed -E 's/Tests:\s+//g')
-        echo ::set-output name=result::${RESULT}
-        echo ::set-output name=result-emoji::${RESULT_EMOJI}
-        echo ::set-output name=success::${SUCCESS}
-        echo ::set-output name=coverage::${COVERAGE}
-        echo ::set-output name=summary::${SUMMARY}
-      shell: bash
-
-    # Create PR Text
-    - id: create-pr-comment
-      name: Create PR summary
+    - name: Cache Composer Packages
+      uses: actions/cache@v2
       env:
-        RESULT_JS_LINT: ${{ steps.lint-results.outputs.result }}
-        RESULT_EMOJI_JS_LINT: ${{ steps.lint-results.outputs.result-emoji }}
-        SUMMARY_JS_LINT: ${{ steps.lint-results.outputs.summary }}
-        RESULT_JS: ${{ steps.test-results.outputs.result }}
-        RESULT_EMOJI_JS: ${{ steps.test-results.outputs.result-emoji }}
-        COVERAGE_JS: ${{ steps.test-results.outputs.coverage }}
-        SUMMARY_JS: ${{ steps.test-results.outputs.summary }}
-      run: |
-        FILE=${{ inputs.output-path }}/${{ inputs.pr-comment-file }}
-        ALL_EMOJI=$([ "$RESULT_JS" == "PASS" -a "$RESULT_JS_LINT" == "PASS" ] && echo ':white_check_mark:' || echo ':x:')
-        echo "# $ALL_EMOJI Test Results"                             > $FILE
-        echo "## $RESULT_EMOJI_JS_LINT Linting $RESULT_JS_LINT"     >> $FILE
-        echo "### $SUMMARY_JS_LINT"                                 >> $FILE
-        echo "## $RESULT_EMOJI_JS Jest Tests $RESULT_JS"            >> $FILE
-        echo "### $SUMMARY_JS; Coverage: $COVERAGE_JS"              >> $FILE
-        echo '```'                                                  >> $FILE
-        cat ${{ inputs.output-path }}/${{ inputs.test-results-file }} | sed -n '/Coverage summary/,$p'  >> $FILE
-        echo '```'                                                  >> $FILE
-      shell: bash
+        cache-name: cache-composer
+      with:
+        path: ./vendor
+        key: composer-vendor-cache-${{ hashFiles('./composer.lock') }}
+        restore-keys: composer-vendor-cache-
 
-    # Create Email Text
-    - id: create-email
-      name: Create email body
-      run: |
-        FILE=${{ inputs.output-path }}/${{ inputs.email-file }}
-        [ -f ${{ inputs.output-path }}/git-status.txt ] && cp ${{ inputs.output-path }}/git-status.txt $FILE
-        [ -f ${{ inputs.output-path }}/git-status.txt ] && echo "------------------"                >> $FILE
-        [ -f ${{ inputs.output-path }}/s3-path.txt ] && echo "S3 Results can be found here:"        >> $FILE
-        [ -f ${{ inputs.output-path }}/s3-path.txt ] && cat ${{ inputs.output-path }}/s3-path.txt   >> $FILE
-        [ -f ${{ inputs.output-path }}/s3-path.txt ] && echo "------------------"                   >> $FILE
-        cat ${{ inputs.output-path }}/${{ inputs.lint-results-file }}                               >> $FILE
-        echo "------------------"                                                                   >> $FILE
-        cat ${{ inputs.output-path }}/${{ inputs.test-results-file }}                               >> $FILE
-      shell: bash
-
-    # - id: output-summary
-    #   run: |
-    #     echo "------------------"
-    #     echo "LINT RESULTS"
-    #     cat ${{ inputs.output-path }}/${{ inputs.lint-results-file }}
-    #     echo "------------------"
-    #     echo "TEST RESULTS"
-    #     cat ${{ inputs.output-path }}/${{ inputs.test-results-file }}
-    #     echo "------------------"
-    #     echo "PR COMMENT"
-    #     cat ${{ inputs.output-path }}/${{ inputs.pr-comment-file }}
-    #     echo "------------------"
-    #     echo "EMAIL"
-    #     cat ${{ inputs.output-path }}/${{ inputs.email-file }}
-    #   shell: bash
+    - id: composer-install
+      name: Composer Install
+      run: composer install --prefer-dist
